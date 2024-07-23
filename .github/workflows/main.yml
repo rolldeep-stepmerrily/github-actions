@@ -1,4 +1,4 @@
-name: NestJS CI/CD
+name: CI/CD
 
 on:
   push:
@@ -11,28 +11,40 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - name: Use Node.js
+      - name: Node Check
         uses: actions/setup-node@v3
         with:
-          node-version: '20.x'
+          node-version: '18.x'
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Install Dependencies
+        run: npm ci || (echo "fail - Install Dependencies" && exit 1)
+
+      - name: Prisma Generate
+        run: npx prisma generate || (echo "fail - Prisma Generate" && exit 1)
 
       - name: Build
-        run: npm run build
+        run: npm run build || (echo "fail - Build" && exit 1)
+
+      - name: Prepare Deployment Package
+        run: |
+          mkdir -p deploy
+          cp -r dist prisma package.json package-lock.json tsconfig.json ecosystem.config.js deploy/
+          tar -czf deploy.tar.gz -C deploy . || (echo "fail - Prepare Deployment Package" && exit 1)
 
       - name: Deploy
         env:
-          PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY  }}
+          PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
           HOST: ${{ secrets.EC2_HOST }}
           USER: ${{ secrets.EC2_USER }}
         run: |
           echo "$PRIVATE_KEY" > private_key && chmod 600 private_key
+          scp -o StrictHostKeyChecking=no -i private_key deploy.tar.gz ${USER}@${HOST}:~/ || (echo "fail - Deploy (copy deployment package to server)" && exit 1)
           ssh -o StrictHostKeyChecking=no -i private_key ${USER}@${HOST} '
-            cd /project/github-actions &&
-            git pull origin main &&
-            npm ci &&
-            npm run build &&
-            pm2 restart main
-          '
+            mkdir -p ~/project-directory
+            tar -xzf deploy.tar.gz -C ~/project-directory || (echo "fail - Deploy (extract deployment package on server)" && exit 1)
+            cd ~/project-directory
+            npm ci || (echo "fail - Deploy (install dependencies on server)" && exit 1)
+            npx prisma generate || (echo "fail - Deploy (generate prisma client on server)" && exit 1)
+            pm2 reload ecosystem.config.js || pm2 start ecosystem.config.js || (echo "fail - Deploy (start/reload application with PM2)" && exit 1)
+            rm -f ~/deploy.tar.gz || (echo "fail - Deploy (remove deployment package)" && exit 1)' || (echo "fail - Deploy (execute commands on server)" && exit 1)
+          rm -f private_key
